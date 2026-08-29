@@ -37,6 +37,8 @@ const urlArg = getArg('--url');
 const dirArg = getArg('--dir');
 const HOME_ONLY = hasFlag('--home-only');
 const ALL = hasFlag('--all');
+const WAIT_FOR_IMAGE = getArg('--wait-for-image'); // substring the og:image must contain
+const POLL_TIMEOUT = parseInt(getArg('--poll-timeout') || '480', 10);
 
 function decodeEntities(s) {
   if (!s) return s;
@@ -171,6 +173,23 @@ async function main() {
     const u = urlArg;
     const origin = new URL(u).origin;
     console.log(`Validating live URL: ${u}\n`);
+
+    // Deploy-aware wait: if we expect the deploy to flip og:image to a new
+    // asset, poll until it appears (or timeout) so we validate the NEW build,
+    // not the stale one still served right after `push` to main.
+    if (WAIT_FOR_IMAGE) {
+      const deadline = Date.now() + POLL_TIMEOUT * 1000;
+      let ready = false;
+      while (Date.now() < deadline) {
+        const probe = await httpGet(u);
+        const img = findMeta(probe.body || '', 'og:image');
+        if (img && img.includes(WAIT_FOR_IMAGE)) { ready = true; break; }
+        process.stdout.write('.');
+        await new Promise((r) => setTimeout(r, 15000));
+      }
+      console.log(ready ? '\n[wait] expected og:image is live, validating now.' : `\n[wait] timed out after ${POLL_TIMEOUT}s waiting for og:image to contain "${WAIT_FOR_IMAGE}"; validating current state.`);
+    }
+
     const r = await httpGet(u);
     if (r.status !== 200) { record('FAIL', `page not reachable (HTTP ${r.status})`, u); process.exit(1); }
     pages.push({ html: r.body, label: u, origin });

@@ -12,6 +12,14 @@ inputs:
     description: 'Also require twitter:card == summary_large_image and twitter:image (default true).'
     required: false
     default: 'true'
+  wait-for-image:
+    description: 'Substring the og:image URL must contain before validating (deploy-aware wait, e.g. /og-image.png).'
+    required: false
+    default: ''
+  poll-timeout:
+    description: 'Max seconds to wait for the expected og:image to appear (default 480).'
+    required: false
+    default: '480'
 runs:
   using: 'composite'
   steps:
@@ -23,4 +31,4 @@ runs:
         path: _ogcheck
     - name: Validate social card
       shell: bash
-      run: node _ogcheck/validate-og.cjs --url "${{ inputs.url }}"
+      run: node _ogcheck/validate-og.cjs --url "${{ inputs.url }}" ${{ inputs.wait-for-image != '' && format('--wait-for-image {0}', inputs.wait-for-image) || '' }} ${{ inputs.wait-for-image != '' && format('--poll-timeout {0}', inputs.poll-timeout) || '' }}
