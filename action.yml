@@ -1,0 +1,26 @@
+name: 'Site OG / Social Card Check'
+description: 'Validate a website''s Open Graph / link-preview (social card) so shares on WhatsApp / iMessage / LinkedIn / Slack never render as bare links.'
+author: 'Luca Berton'
+branding:
+  icon: 'check-circle'
+  color: 'green'
+inputs:
+  url:
+    description: 'Full URL of the page to validate (e.g. https://example.com/).'
+    required: true
+  require-twitter-card:
+    description: 'Also require twitter:card == summary_large_image and twitter:image (default true).'
+    required: false
+    default: 'true'
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout validator
+      uses: actions/checkout@v4
+      with:
+        repository: lucab85/site-og-check
+        ref: main
+        path: _ogcheck
+    - name: Validate social card
+      shell: bash
+      run: node _ogcheck/validate-og.cjs --url "${{ inputs.url }}"
