@@ -19,6 +19,16 @@ renders as a bare link.
 
 Run the tests with `node test/run.cjs`.
 
+### Every page
+```bash
+node validate-og.cjs --url https://example.com/ --sitemap                 # all pages in the sitemap
+node validate-og.cjs --url https://example.com/ --sitemap --max-pages 200 # an even sample
+```
+Sitemaps come from `robots.txt`, then `/sitemap-index.xml`, then `/sitemap.xml`.
+Findings are grouped by kind with example pages. In a workflow: `sitemap: 'true'`
+on the action. `full-crawl.yml` crawls every site daily and keeps the issue
+"OG full crawl failing" up to date (closed when everything passes).
+
 ### Built output
 ```bash
 node validate-og.cjs --dir ./public --site https://example.com          # homepage

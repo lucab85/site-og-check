@@ -1,0 +1,101 @@
+name: OG full crawl (every page, all sites)
+
+# The 6-hourly monitor checks each homepage. This checks every page in each
+# site's sitemap once a day, as WhatsApp would fetch it, and keeps one issue
+# ("OG full crawl failing") up to date with the grouped findings.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      max-pages:
+        description: 'Pages per site (0 = all)'
+        default: '0'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        site:
+          - https://lucaberton.com/
+          - https://www.udienza.com/
+          - https://www.openempower.com/
+          - https://www.ansiblepilot.com/
+          - https://www.ansiblebyexample.com/
+          - https://www.terraformpilot.com/
+          - https://kubernetes.recipes/
+          - https://www.copypastelearn.com/
+          - https://www.trymanna.ai/
+          - https://heavenartshop.com/
+          - https://sferapay.com/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Crawl
+        id: crawl
+        run: |
+          name=$(echo '${{ matrix.site }}' | sed -E 's#https?://(www\.)?##; s#/.*##')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          set +e
+          node validate-og.cjs --url '${{ matrix.site }}' --sitemap --max-pages '${{ inputs.max-pages || 0 }}' --concurrency 6 > "report-$name.txt" 2>&1
+          code=$?
+          set -e
+          cat "report-$name.txt"
+          echo "$code" > "exit-$name.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crawl-${{ steps.crawl.outputs.name }}
+          path: |
+            report-*.txt
+            exit-*.txt
+
+  report:
+    needs: crawl
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+          merge-multiple: true
+      - name: Open, update or close the issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const dir = 'reports';
+            const sites = fs.readdirSync(dir).filter((f) => f.startsWith('exit-')).map((f) => f.slice(5, -4)).sort();
+            let failing = [], body = '';
+            for (const s of sites) {
+              const code = fs.readFileSync(`${dir}/exit-${s}.txt`, 'utf8').trim();
+              const text = fs.readFileSync(`${dir}/report-${s}.txt`, 'utf8');
+              const summary = text.slice(text.lastIndexOf(' page(s) checked.') > 0 ? text.lastIndexOf('\n', text.lastIndexOf(' page(s) checked.')) : 0);
+              if (code !== '0') {
+                failing.push(s);
+                body += `\n## ${s}\n\`\`\`\n${summary.trim().slice(0, 6000)}\n\`\`\`\n`;
+              }
+            }
+            const title = 'OG full crawl failing';
+            const { owner, repo } = context.repo;
+            const open = (await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: 'og-monitor' })).data.find((i) => i.title === title);
+            const run = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            if (!failing.length) {
+              if (open) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: open.number, body: `All ${sites.length} sites pass on every sitemap page. ${run}` });
+                await github.rest.issues.update({ owner, repo, issue_number: open.number, state: 'closed' });
+              }
+              return;
+            }
+            const text = `Full crawl ${new Date().toISOString().slice(0, 10)}: ${failing.length} of ${sites.length} site(s) have pages a link preview cannot use.\n${body}\nRun: ${run}`;
+            if (open) await github.rest.issues.createComment({ owner, repo, issue_number: open.number, body: text });
+            else await github.rest.issues.create({ owner, repo, title, body: text, labels: ['og-monitor'] });

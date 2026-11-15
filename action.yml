@@ -20,6 +20,14 @@ inputs:
     description: 'Max seconds to wait for the expected og:image to appear (default 480).'
     required: false
     default: '480'
+  sitemap:
+    description: 'Check every page listed in the site''s sitemap instead of only the URL (default false).'
+    required: false
+    default: 'false'
+  max-pages:
+    description: 'With sitemap, check at most this many pages, spread over the sitemap (default 0 = all).'
+    required: false
+    default: '0'
 runs:
   using: 'composite'
   steps:
@@ -31,4 +39,4 @@ runs:
         path: _ogcheck
     - name: Validate social card
       shell: bash
-      run: node _ogcheck/validate-og.cjs --url "${{ inputs.url }}" ${{ inputs.wait-for-image != '' && format('--wait-for-image {0}', inputs.wait-for-image) || '' }} ${{ inputs.wait-for-image != '' && format('--poll-timeout {0}', inputs.poll-timeout) || '' }}
+      run: node _ogcheck/validate-og.cjs --url "${{ inputs.url }}" ${{ inputs.wait-for-image != '' && format('--wait-for-image {0}', inputs.wait-for-image) || '' }} ${{ inputs.wait-for-image != '' && format('--poll-timeout {0}', inputs.poll-timeout) || '' }} ${{ inputs.sitemap == 'true' && format('--sitemap --max-pages {0}', inputs.max-pages) || '' }}

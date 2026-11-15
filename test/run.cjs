@@ -53,6 +53,9 @@ const cases = [
   { name: 'og:image too heavy', html: head(good('/heavy.png')), expect: 1, output: /KB; WhatsApp drops/ },
   { name: 'og:image is svg', html: head(good('/og.svg')), expect: 1, output: /SVG/ },
   { name: 'og tags in body', html: head('').replace('<p>hi</p>', good()), expect: 1, output: /outside <head>/ },
+  { name: 'player card with twitter:player', html: head(good().replace('content="summary_large_image"', 'content="player"') + '<meta name="twitter:player" content="https://example.test/embed">'), expect: 0 },
+  { name: 'player card without twitter:player', html: head(good().replace('content="summary_large_image"', 'content="player"')), expect: 1, output: /use summary_large_image/ },
+  { name: 'summary card (warning only)', html: head(good().replace('content="summary_large_image"', 'content="summary"')), expect: 0, output: /twitter:card is summary/ },
   { name: 'declared size wrong (warning only)', html: head(good('/og.png', '<meta property="og:image:width" content="800">')), expect: 0, output: /say 800x\?/ },
 ];
 

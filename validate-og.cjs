@@ -6,11 +6,19 @@
  *   node validate-og.cjs --url https://example.com[/path]   (validate a LIVE page)
  *   node validate-og.cjs --dir ./public [--home-only]        (validate built HTML in a dir)
  *   node validate-og.cjs --dir ./public --all                (audit every *.html in dir)
+ *   node validate-og.cjs --url https://example.com --sitemap (every page in the sitemap)
  *
  * Options:
  *   --site https://example.com   (dir mode) og:image URLs on this origin are
  *                                checked as files in --dir, without network;
  *   --quiet                      print only FAIL / WARN lines and the summary;
+ *   --sitemap                    (url mode) read robots.txt / sitemap-index.xml /
+ *                                sitemap.xml and check every page listed;
+ *   --max-pages <n>              (sitemap) check at most n pages (default: all);
+ *   --concurrency <n>            (sitemap) parallel page fetches, default 6.
+ *
+ * With more than one page, findings are grouped by kind with example URLs
+ * instead of one line per page; --verbose prints every line as well.
  *   --wait-for-image <substring> (url mode) poll until og:image contains it;
  *   --poll-timeout <seconds>     (url mode) max wait, default 480.
  *
@@ -26,7 +34,8 @@
  *     WhatsApp user agent, a JPEG, PNG or WebP (no SVG), at least 200x200
  *     (warn below 600x315), under 600 KB (warn above 300 KB), and matching
  *     og:image:width / og:image:height when those are declared;
- *   - twitter:card == "summary_large_image" and twitter:image present.
+ *   - twitter:card == "summary_large_image" (or "player" with twitter:player;
+ *     "summary" warns) and twitter:image present.
  *
  * Exit code 1 = at least one FAIL (so it can gate a deploy pipeline).
  * Exit code 0 = all checks passed (or only warnings).
@@ -51,6 +60,11 @@ const dirArg = getArg('--dir');
 const siteArg = getArg('--site');
 const HOME_ONLY = hasFlag('--home-only');
 const ALL = hasFlag('--all');
+const SITEMAP = hasFlag('--sitemap');
+const MAX_PAGES = parseInt(getArg('--max-pages') || '0', 10);
+const CONCURRENCY = Math.max(1, parseInt(getArg('--concurrency') || '6', 10));
+const VERBOSE = hasFlag('--verbose');
+let multiPage = false; // set when several pages are checked: group the output
 const QUIET = hasFlag('--quiet');
 const WAIT_FOR_IMAGE = getArg('--wait-for-image'); // substring the og:image must contain
 const POLL_TIMEOUT = parseInt(getArg('--poll-timeout') || '480', 10);
@@ -167,6 +181,7 @@ function imageInfo(buf) {
 const recs = [];
 function record(level, msg, detail) {
   recs.push({ level, msg, detail });
+  if (multiPage && !VERBOSE) return;
   if (QUIET && level === 'OK') return;
   const icon = level === 'FAIL' ? '❌' : level === 'WARN' ? '⚠️' : '✅';
   console.log(`${icon} ${level}: ${msg}${detail ? ` — ${detail}` : ''}`);
@@ -288,7 +303,9 @@ async function validateHtml(html, label, origin, dir) {
   const twCard = contentOf(tags, 'twitter:card');
   const twImage = contentOf(tags, 'twitter:image');
   if (!twCard) record('FAIL', `[${label}] twitter:card missing`, '');
-  else if (twCard !== 'summary_large_image') record('FAIL', `[${label}] twitter:card != summary_large_image (${twCard})`, '');
+  else if (twCard === 'player' && contentOf(tags, 'twitter:player')) { /* video card (embeds), fine */ }
+  else if (twCard === 'summary') record('WARN', `[${label}] twitter:card is summary (small image); summary_large_image shows the full card`, '');
+  else if (twCard !== 'summary_large_image') record('FAIL', `[${label}] twitter:card is ${twCard}; use summary_large_image (or player with twitter:player)`, '');
   if (!twImage) record('FAIL', `[${label}] twitter:image missing`, '');
 }
 
@@ -299,6 +316,81 @@ function walk(dir, out = []) {
     else if (e.name.endsWith('.html')) out.push(p);
   }
   return out;
+}
+
+/* Every page URL listed in a site's sitemaps (robots.txt first). */
+async function sitemapUrls(origin) {
+  const seen = new Set();
+  const pages = [];
+  const queue = [];
+  const robots = await httpGet(`${origin}/robots.txt`).catch(() => null);
+  if (robots && robots.status === 200) {
+    for (const m of robots.buffer.toString('utf8').matchAll(/^\s*sitemap:\s*(\S+)/gim)) queue.push(m[1]);
+  }
+  if (!queue.length) queue.push(`${origin}/sitemap-index.xml`, `${origin}/sitemap.xml`);
+  while (queue.length) {
+    const url = queue.shift();
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const r = await httpGet(url).catch(() => null);
+    if (!r || r.status !== 200) continue;
+    const xml = r.buffer.toString('utf8');
+    const locs = [...xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].map((m) => decodeEntities(m[1]));
+    if (/<sitemapindex\b/i.test(xml)) queue.push(...locs);
+    else pages.push(...locs);
+  }
+  return [...new Set(pages)];
+}
+
+async function pool(items, n, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) {
+      const item = items[i++];
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/* Fetch a page as WhatsApp does; on failure tell a WAF/bot rule from an outage. */
+async function fetchPage(u) {
+  const r = await httpGet(u, WHATSAPP_UA).catch((e) => ({ status: 0, body: '', error: e.message }));
+  if (r.status === 200) return r;
+  const other = await httpGet(u, DEFAULT_UA).catch(() => ({ status: 0 }));
+  const msg = other.status === 200
+    ? `page blocked for the WhatsApp user agent (HTTP ${r.status}, ${other.status} otherwise)`
+    : `page not reachable (${r.error || 'HTTP ' + r.status})`;
+  record('FAIL', `[${u}] ${msg}`, '');
+  return null;
+}
+
+/* One line per kind of finding, with a count and a few example pages. */
+function printGrouped(pageCount) {
+  const groups = new Map();
+  for (const r of recs) {
+    if (r.level === 'OK') continue;
+    const m = r.msg.match(/^\[([^\]]+)\] (.*)$/);
+    const page = m ? m[1] : '';
+    const kind = (m ? m[2] : r.msg).replace(/\d+(\.\d+)?/g, 'N');
+    const key = `${r.level}|${kind}`;
+    if (!groups.has(key)) groups.set(key, { level: r.level, kind, example: m ? m[2] : r.msg, pages: [], details: new Set() });
+    const g = groups.get(key);
+    g.pages.push(page);
+    if (r.detail) g.details.add(r.detail);
+  }
+  const sorted = [...groups.values()].sort((a, b) => (a.level === b.level ? b.pages.length - a.pages.length : a.level === 'FAIL' ? -1 : 1));
+  console.log(`\n${pageCount} page(s) checked.`);
+  for (const g of sorted) {
+    const icon = g.level === 'FAIL' ? '❌' : '⚠️';
+    console.log(`\n${icon} ${g.level} ×${g.pages.length}: ${g.pages.length > 1 ? g.kind : g.example}`);
+    for (const p of g.pages.slice(0, 5)) console.log(`     ${p}`);
+    if (g.pages.length > 5) console.log(`     … and ${g.pages.length - 5} more`);
+    const d = [...g.details];
+    if (d.length && d.length <= 3) for (const x of d) console.log(`     → ${x.slice(0, 160)}`);
+  }
+  const okPages = pageCount - new Set(recs.filter((r) => r.level === 'FAIL').map((r) => (r.msg.match(/^\[([^\]]+)\]/) || [])[1])).size;
+  console.log(`\n${okPages} of ${pageCount} page(s) without failures.`);
 }
 
 // Redirect stubs and noindex pages are not shared; skip them in --all audits.
@@ -326,17 +418,34 @@ async function main() {
       console.log(ready ? '\n[wait] expected og:image is live, validating now.' : `\n[wait] timed out after ${POLL_TIMEOUT}s waiting for og:image to contain "${WAIT_FOR_IMAGE}"; validating current state.`);
     }
 
-    // Fetch as WhatsApp does; if that fails, tell a WAF/bot rule from an outage.
-    const r = await httpGet(u, WHATSAPP_UA).catch((e) => ({ status: 0, body: '', error: e.message }));
-    if (r.status !== 200) {
-      const other = await httpGet(u, DEFAULT_UA).catch(() => ({ status: 0 }));
-      const msg = other.status === 200
-        ? `page blocked for the WhatsApp user agent (HTTP ${r.status}, ${other.status} otherwise)`
-        : `page not reachable (${r.error || 'HTTP ' + r.status})`;
-      record('FAIL', msg, u);
-      process.exit(1);
+    if (SITEMAP) {
+      let urls = await sitemapUrls(origin);
+      if (!urls.length) {
+        record('FAIL', `[${origin}] no sitemap found (robots.txt, /sitemap-index.xml, /sitemap.xml)`, '');
+      } else {
+        if (MAX_PAGES > 0 && urls.length > MAX_PAGES) {
+          // keep the homepage, then an even spread over the rest
+          const step = urls.length / MAX_PAGES;
+          urls = [...new Set([u, ...Array.from({ length: MAX_PAGES - 1 }, (_, k) => urls[Math.floor(k * step)])])];
+        }
+        multiPage = true;
+        console.log(`Checking ${urls.length} page(s) from the sitemap, ${CONCURRENCY} at a time…`);
+        let done = 0;
+        let skipped = 0;
+        await pool(urls, CONCURRENCY, async (page) => {
+          const r = await fetchPage(page);
+          if (r && isStub(r.body)) skipped++;
+          else if (r) await validateHtml(r.body, page, origin, null);
+          if (++done % 100 === 0) console.log(`  ${done}/${urls.length}`);
+        });
+        if (skipped) console.log(`(skipped ${skipped} redirect stub(s))`);
+        printGrouped(urls.length - skipped);
+      }
+    } else {
+      const r = await fetchPage(u);
+      if (!r) process.exit(1);
+      await validateHtml(r.body, u, origin, null);
     }
-    await validateHtml(r.body, u, origin, null);
   } else if (DIR_MODE && dirArg) {
     const files = walk(dirArg);
     let targets = files;
@@ -346,6 +455,7 @@ async function main() {
     }
     const origin = siteArg ? new URL(siteArg).origin : null;
     let skipped = 0;
+    multiPage = targets.length > 1;
     console.log(`Validating ${targets.length} page(s) in ${dirArg}${siteArg ? ` (site ${origin})` : ''}\n`);
     for (const f of targets) {
       const html = fs.readFileSync(f, 'utf8');
@@ -353,8 +463,9 @@ async function main() {
       await validateHtml(html, path.relative(dirArg, f) || 'index.html', origin, dirArg);
     }
     if (skipped) console.log(`(skipped ${skipped} redirect stub(s))`);
+    if (multiPage) printGrouped(targets.length - skipped);
   } else {
-    console.error('Usage:\n  node validate-og.cjs --url https://example.com\n  node validate-og.cjs --dir ./public [--home-only|--all] [--site https://example.com] [--quiet]');
+    console.error('Usage:\n  node validate-og.cjs --url https://example.com [--sitemap [--max-pages N] [--concurrency N]]\n  node validate-og.cjs --dir ./public [--home-only|--all] [--site https://example.com] [--quiet]');
     process.exit(2);
   }
 
