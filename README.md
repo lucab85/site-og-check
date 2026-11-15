@@ -9,6 +9,22 @@ renders as a bare link.
 - `og:image` present, **reachable (HTTP 200)**, absolute `https://`, and **real
   pixel dimensions ≥ 200×200** (warns below 600×315)
 - `twitter:card == summary_large_image` and `twitter:image` present
+- the tags are in `<head>` and written the way **WhatsApp** reads them:
+  `<meta property="og:image" content="https://...">` with quoted values.
+  HTML minifiers that drop the quotes (`<meta content=https://... property=og:image>`)
+  pass Facebook's debugger, but WhatsApp shows the link with no image
+- `og:image` fetched with the WhatsApp user agent (a bot rule or WAF that blocks
+  it fails), served as an image, JPEG/PNG (SVG fails, WebP/GIF warn), **under
+  600 KB** (warns above 300 KB), and matching `og:image:width`/`height` if declared
+
+Run the tests with `node test/run.cjs`.
+
+### Built output
+```bash
+node validate-og.cjs --dir ./public --site https://example.com          # homepage
+node validate-og.cjs --dir ./public --site https://example.com --all --quiet
+```
+`--site` lets images on your own domain be checked as files in the build, with no network.
 
 Exit code `1` on any FAIL so it can gate a deployment.
 
