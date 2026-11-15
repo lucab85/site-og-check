@@ -421,7 +421,9 @@ async function main() {
     if (SITEMAP) {
       let urls = await sitemapUrls(origin);
       if (!urls.length) {
-        record('FAIL', `[${origin}] no sitemap found (robots.txt, /sitemap-index.xml, /sitemap.xml)`, '');
+        record('WARN', `[${origin}] no sitemap found (robots.txt, /sitemap-index.xml, /sitemap.xml); checking ${u} only`, '');
+        const r = await fetchPage(u);
+        if (r) await validateHtml(r.body, u, origin, null);
       } else {
         if (MAX_PAGES > 0 && urls.length > MAX_PAGES) {
           // keep the homepage, then an even spread over the rest
