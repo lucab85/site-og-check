@@ -24,6 +24,8 @@ jobs:
             "https://heavenartshop.com/"
             "https://openempower.com/"
             "https://sferapay.com/"
+            "https://kubernetes.recipes/"
+            "https://www.udienza.com/"
           )
           fail=0
           report=""
